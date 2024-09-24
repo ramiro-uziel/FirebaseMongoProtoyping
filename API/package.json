@@ -1,0 +1,17 @@
+{
+  "dependencies": {
+    "express": "^4.21.0",
+    "firebase-admin": "^12.5.0",
+    "mongodb": "^6.9.0"
+  },
+  "name": "api",
+  "version": "1.0.0",
+  "main": "index.js",
+  "devDependencies": {},
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "description": ""
+}
