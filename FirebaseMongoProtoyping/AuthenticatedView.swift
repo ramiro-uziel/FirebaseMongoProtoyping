@@ -3,8 +3,10 @@ import SwiftUI
 struct AuthenticatedView: View {
     @EnvironmentObject var authModel: AuthModel
     @State private var isEditingProfile = false
-    @State private var editedName = ""
-    @State private var editedPhone = ""
+    @State private var editedNombre = ""
+    @State private var editedCelular = ""
+    @State private var editedGenero = ""
+    @State private var editedFechaDeNacimiento = Date()
     @State private var showingAlert = false
     @State private var alertMessage = ""
     
@@ -13,13 +15,22 @@ struct AuthenticatedView: View {
             Form {
                 Section(header: Text("User Information")) {
                     if isEditingProfile {
-                        TextField("Name", text: $editedName)
-                        TextField("Phone", text: $editedPhone)
+                        TextField("Nombre", text: $editedNombre)
+                        TextField("Celular", text: $editedCelular)
                             .keyboardType(.phonePad)
+                        Picker("Género", selection: $editedGenero) {
+                            Text("Male").tag("male")
+                            Text("Female").tag("female")
+                            Text("Other").tag("other")
+                        }
+                        DatePicker("Fecha de Nacimiento", selection: $editedFechaDeNacimiento, displayedComponents: .date)
                     } else {
-                        LabeledContent("Name", value: authModel.userData.name)
+                        LabeledContent("Nombre", value: authModel.userData.nombre)
                         LabeledContent("Email", value: authModel.userData.email)
-                        LabeledContent("Phone", value: authModel.userData.phone)
+                        LabeledContent("Celular", value: authModel.userData.celular)
+                        LabeledContent("Género", value: authModel.userData.genero)
+                        LabeledContent("Fecha de Nacimiento", value: authModel.userData.fechaDeNacimiento)
+                        LabeledContent("Tipo", value: authModel.userData.tipo)
                     }
                 }
                 
@@ -28,7 +39,7 @@ struct AuthenticatedView: View {
                         Button("Save Changes") {
                             saveChanges()
                         }
-                        .disabled(editedName.isEmpty || editedPhone.isEmpty)
+                        .disabled(editedNombre.isEmpty || editedCelular.isEmpty || editedGenero.isEmpty)
                     } else {
                         Button("Edit Profile") {
                             startEditing()
@@ -45,7 +56,7 @@ struct AuthenticatedView: View {
                     .foregroundColor(.red)
                 }
             }
-            .navigationTitle("Welcome, \(authModel.userData.name)!")
+            .navigationTitle("Welcome, \(authModel.userData.nombre)!")
             .toolbar {
                 if isEditingProfile {
                     Button("Cancel") {
@@ -60,8 +71,14 @@ struct AuthenticatedView: View {
     }
     
     private func startEditing() {
-        editedName = authModel.userData.name
-        editedPhone = authModel.userData.phone
+        editedNombre = authModel.userData.nombre
+        editedCelular = authModel.userData.celular
+        editedGenero = authModel.userData.genero
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyy-MM-dd"
+        if let date = dateFormatter.date(from: authModel.userData.fechaDeNacimiento) {
+            editedFechaDeNacimiento = date
+        }
         isEditingProfile = true
     }
     
@@ -72,9 +89,15 @@ struct AuthenticatedView: View {
     private func saveChanges() {
         Task {
             do {
+                let dateFormatter = DateFormatter()
+                dateFormatter.dateFormat = "yyyy-MM-dd"
+                let birthDateString = dateFormatter.string(from: editedFechaDeNacimiento)
+                
                 try await authModel.updateUserInfo(newData: [
-                    "name": editedName,
-                    "phone": editedPhone
+                    "nombre": editedNombre,
+                    "celular": editedCelular,
+                    "genero": editedGenero,
+                    "fechaDeNacimiento": birthDateString
                 ])
                 await MainActor.run {
                     isEditingProfile = false

@@ -5,10 +5,13 @@ struct SignUpView: View {
     @Binding var isShowingSignUp: Bool
     @State private var password = ""
     @State private var confirmPassword = ""
+    @State private var birthDate = Date()
+    @State private var gender = "male"
     
     private var isSignUpDisabled: Bool {
-        authModel.userData.name.isEmpty ||
+        authModel.userData.nombre.isEmpty ||
         authModel.userData.email.isEmpty ||
+        authModel.userData.celular.isEmpty ||
         password.isEmpty ||
         confirmPassword.isEmpty ||
         password != confirmPassword
@@ -22,12 +25,12 @@ struct SignUpView: View {
                     .fontWeight(.bold)
                 
                 VStack(spacing: 15) {
-                    TextField("Name", text: $authModel.userData.name)
+                    TextField("Nombre", text: $authModel.userData.nombre)
                         .textFieldStyle(RoundedBorderTextFieldStyle())
                         .textInputAutocapitalization(.words)
                         .autocorrectionDisabled(true)
                     
-                    TextField("Phone", text: $authModel.userData.phone)
+                    TextField("Celular", text: $authModel.userData.celular)
                         .textFieldStyle(RoundedBorderTextFieldStyle())
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled(true)
@@ -46,11 +49,24 @@ struct SignUpView: View {
                     SecureField("Confirm Password", text: $confirmPassword)
                         .textFieldStyle(RoundedBorderTextFieldStyle())
                         .textInputAutocapitalization(.never)
+                    
+                    Picker("Género", selection: $gender) {
+                        Text("Male").tag("male")
+                        Text("Female").tag("female")
+                        Text("Other").tag("other")
+                    }
+                    .pickerStyle(SegmentedPickerStyle())
+                    
+                    DatePicker("Fecha de Nacimiento", selection: $birthDate, displayedComponents: .date)
                 }
                 .padding(.horizontal)
                 
                 Button(action: {
                     Task {
+                        let dateFormatter = DateFormatter()
+                        dateFormatter.dateFormat = "yyyy-MM-dd"
+                        authModel.userData.fechaDeNacimiento = dateFormatter.string(from: birthDate)
+                        authModel.userData.genero = gender
                         await authModel.signUp(password: password)
                     }
                 }) {
@@ -125,6 +141,6 @@ struct SignUpView: View {
 }
 
 #Preview {
-    LoginView(isShowingSignUp: .constant(true))
+    SignUpView(isShowingSignUp: .constant(true))
         .environmentObject(AuthModel())
 }

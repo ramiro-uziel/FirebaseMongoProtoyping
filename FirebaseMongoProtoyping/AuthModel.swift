@@ -5,18 +5,23 @@ import GoogleSignIn
 import os
 
 struct UserData: Codable {
-    var name: String = ""
-    var phone: String = ""
+    var firebaseUID: String = ""
+    var nombre: String = ""
+    var genero: String = ""
+    var celular: String = ""
     var email: String = ""
+    var fechaDeNacimiento: String = ""
+    var tipo: String = "cliente" // Default to "cliente", can be "abogado" or "admin"
 }
 
 class AuthModel: ObservableObject {
     enum AuthState {
         case signedOut
         case signingIn
-        case needsPhoneNumber
+        case needsAdditionalInfo
         case authenticating
         case authenticated
+        case needsEmailVerification
         case error(String)
     }
     
@@ -25,7 +30,7 @@ class AuthModel: ObservableObject {
     @Published var isLoading = false
     
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier!, category: "AuthModel")
-    private let baseURL = "http://127.0.0.1:4000/api"
+    private let baseURL = "http://localhost:3000" // Update this with your actual base URL
     
     init() {
         checkUserSession()
@@ -33,10 +38,15 @@ class AuthModel: ObservableObject {
     
     func checkUserSession() {
         logger.info("Checking user session")
-        if Auth.auth().currentUser != nil {
-            authState = .authenticated
-            Task {
-                await fetchUserInfo()
+        if let user = Auth.auth().currentUser {
+            userData.firebaseUID = user.uid
+            if !user.isEmailVerified {
+                authState = .needsEmailVerification
+            } else {
+                authState = .authenticated
+                Task {
+                    await fetchUserInfo()
+                }
             }
         } else {
             authState = .signedOut
@@ -49,12 +59,16 @@ class AuthModel: ObservableObject {
         authState = .signingIn
         isLoading = true
         do {
-            try await Auth.auth().createUser(withEmail: userData.email, password: password)
-            try await sendUserInfo()
+            guard ["abogado", "cliente", "admin"].contains(userData.tipo) else {
+                throw NSError(domain: "ValidationError", code: 0, userInfo: [NSLocalizedDescriptionKey: "Invalid user type"])
+            }
+            
+            let authResult = try await Auth.auth().createUser(withEmail: userData.email, password: password)
+            userData.firebaseUID = authResult.user.uid
+            try await createUserInfo()
             try await initiateEmailVerification()
-            await fetchUserInfo()
-            authState = .authenticated
-            logger.info("Sign up successful")
+            authState = .needsEmailVerification
+            logger.info("Sign up successful, email verification needed")
         } catch {
             logger.error("Sign up failed: \(error.localizedDescription)")
             authState = .error(error.localizedDescription)
@@ -68,9 +82,14 @@ class AuthModel: ObservableObject {
         authState = .signingIn
         isLoading = true
         do {
-            _ = try await Auth.auth().signIn(withEmail: email, password: password)
-            await fetchUserInfo()
-            authState = .authenticated
+            let authResult = try await Auth.auth().signIn(withEmail: email, password: password)
+            userData.firebaseUID = authResult.user.uid
+            if !authResult.user.isEmailVerified {
+                authState = .needsEmailVerification
+            } else {
+                await fetchUserInfo()
+                authState = .authenticated
+            }
             logger.info("Login successful")
         } catch {
             logger.error("Login failed: \(error.localizedDescription)")
@@ -105,31 +124,27 @@ class AuthModel: ObservableObject {
                 throw NSError(domain: "AuthError", code: 0, userInfo: [NSLocalizedDescriptionKey: "Failed to get ID token from Google"])
             }
             let credential = GoogleAuthProvider.credential(withIDToken: idToken, accessToken: result.user.accessToken.tokenString)
-            _ = try await Auth.auth().signIn(with: credential)
+            let authResult = try await Auth.auth().signIn(with: credential)
+            
+            userData.firebaseUID = authResult.user.uid
+            userData.email = result.user.profile?.email ?? ""
+            userData.nombre = result.user.profile?.name ?? ""
+            userData.tipo = "cliente" // Default type
             
             // Attempt to fetch existing user data
             let userDataExists = await fetchUserInfo()
             
             if userDataExists {
-                // User exists, only update email if it's empty
-                if userData.email.isEmpty {
-                    userData.email = result.user.profile?.email ?? ""
-                    try await sendUserInfo()
-                }
-                
-                if userData.phone.isEmpty {
-                    authState = .needsPhoneNumber
-                    logger.info("Google Sign-In successful, requesting phone number for existing user")
+                if userData.celular.isEmpty || userData.genero.isEmpty || userData.fechaDeNacimiento.isEmpty {
+                    authState = .needsAdditionalInfo
+                    logger.info("Google Sign-In successful, requesting additional info for existing user")
                 } else {
                     authState = .authenticated
                     logger.info("Google Sign-In successful, existing user profile complete")
                 }
             } else {
-                // New user, use Google data
-                userData.name = result.user.profile?.name ?? ""
-                userData.email = result.user.profile?.email ?? ""
-                authState = .needsPhoneNumber
-                logger.info("Google Sign-In successful, requesting phone number for new user")
+                authState = .needsAdditionalInfo
+                logger.info("Google Sign-In successful, new user, requesting additional info")
             }
         } catch {
             logger.error("Google Sign-In failed: \(error.localizedDescription)")
@@ -137,14 +152,33 @@ class AuthModel: ObservableObject {
         }
         isLoading = false
     }
+    
     @MainActor
-    func completeUserProfile(phoneNumber: String) async {
-        logger.info("Completing user profile with phone number")
+    func completeUserProfile(celular: String, genero: String, fechaDeNacimiento: String) async {
+        logger.info("Completing user profile")
         authState = .authenticating
         isLoading = true
-        userData.phone = phoneNumber
         do {
-            try await sendUserInfo()
+            userData.celular = celular
+            userData.genero = genero
+            userData.fechaDeNacimiento = fechaDeNacimiento
+            
+            // Check if user already exists in our database
+            let userExists = await fetchUserInfo()
+            
+            if userExists {
+                // Update existing user
+                try await updateUserInfo(newData: [
+                    "celular": celular,
+                    "genero": genero,
+                    "fechaDeNacimiento": fechaDeNacimiento
+                ])
+            } else {
+                // Create new user
+                try await createUserInfo()
+            }
+            
+            await fetchUserInfo() // Fetch updated user info
             authState = .authenticated
             logger.info("User profile completed successfully")
         } catch {
@@ -169,9 +203,9 @@ class AuthModel: ObservableObject {
         }
     }
     
-    private func sendUserInfo() async throws {
-        logger.info("Sending user info to server")
-        guard let url = URL(string: "\(baseURL)/user") else {
+    private func createUserInfo() async throws {
+        logger.info("Creating user info on server")
+        guard let url = URL(string: "\(baseURL)/crearUsuario") else {
             throw NSError(domain: "URLError", code: 0, userInfo: [NSLocalizedDescriptionKey: "Invalid URL"])
         }
         
@@ -179,42 +213,172 @@ class AuthModel: ObservableObject {
         request.httpMethod = "POST"
         request.addValue("Bearer \(try await Auth.auth().currentUser!.getIDToken())", forHTTPHeaderField: "Authorization")
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(userData)
         
-        let (_, response) = try await URLSession.shared.data(for: request)
+        let userDict: [String: Any] = [
+            "user": [
+                "firebaseUID": userData.firebaseUID,
+                "nombre": userData.nombre,
+                "email": userData.email,
+                "tipo": userData.tipo,
+                "genero": userData.genero,
+                "celular": userData.celular,
+                "fechaDeNacimiento": userData.fechaDeNacimiento
+            ]
+        ]
+        
+        let jsonData = try JSONSerialization.data(withJSONObject: userDict, options: [])
+        request.httpBody = jsonData
+        
+        print("Sending JSON for create: \(String(data: jsonData, encoding: .utf8) ?? "")")
+        
+        let (data, response) = try await URLSession.shared.data(for: request)
         
         guard let httpResponse = response as? HTTPURLResponse, 200...299 ~= httpResponse.statusCode else {
-            logger.error("Server responded with an error when sending user info")
-            throw NSError(domain: "ServerError", code: 0, userInfo: [NSLocalizedDescriptionKey: "Server responded with an error when sending user info"])
+            logger.error("Server responded with an error when creating user info")
+            if let errorMessage = String(data: data, encoding: .utf8) {
+                throw NSError(domain: "ServerError", code: 0, userInfo: [NSLocalizedDescriptionKey: "Server error: \(errorMessage)"])
+            } else {
+                throw NSError(domain: "ServerError", code: 0, userInfo: [NSLocalizedDescriptionKey: "Server responded with an error when creating user info"])
+            }
         }
         
-        logger.info("User info sent successfully")
+        // Parse the response
+        if let json = try JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
+           let insertedId = json["insertedId"] as? String {
+            logger.info("User info created successfully with ID: \(insertedId)")
+        } else {
+            throw NSError(domain: "ServerError", code: 0, userInfo: [NSLocalizedDescriptionKey: "Server did not return expected response for user creation"])
+        }
     }
     
-    private func initiateEmailVerification() async throws {
-        logger.info("Initiating email verification")
-        guard let url = URL(string: "\(baseURL)/verifyEmail") else {
+    func updateUserInfo(newData: [String: Any]) async throws {
+        logger.info("Updating user info")
+        do {
+            var updateData = newData
+            updateData["firebaseUID"] = userData.firebaseUID
+            try await editUserInfo(newData: updateData)
+            await fetchUserInfo() // Fetch updated user info
+            logger.info("User info updated successfully")
+        } catch {
+            logger.error("Failed to update user info: \(error.localizedDescription)")
+            throw error
+        }
+    }
+    
+    private func editUserInfo(newData: [String: Any]) async throws {
+        logger.info("Editing user info on server")
+        guard let url = URL(string: "\(baseURL)/editarUsuario") else {
             throw NSError(domain: "URLError", code: 0, userInfo: [NSLocalizedDescriptionKey: "Invalid URL"])
         }
         
         var request = URLRequest(url: url)
-        request.httpMethod = "POST"
+        request.httpMethod = "PUT"
         request.addValue("Bearer \(try await Auth.auth().currentUser!.getIDToken())", forHTTPHeaderField: "Authorization")
+        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
         
-        let (_, response) = try await URLSession.shared.data(for: request)
+        let jsonData = try JSONSerialization.data(withJSONObject: newData, options: [])
+        request.httpBody = jsonData
         
-        guard let httpResponse = response as? HTTPURLResponse, 200...299 ~= httpResponse.statusCode else {
-            logger.error("Server responded with an error when initiating email verification")
-            throw NSError(domain: "ServerError", code: 0, userInfo: [NSLocalizedDescriptionKey: "Server responded with an error when initiating email verification"])
+        print("Sending JSON for edit: \(String(data: jsonData, encoding: .utf8) ?? "")")
+        
+        let (data, response) = try await URLSession.shared.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw NSError(domain: "ServerError", code: 0, userInfo: [NSLocalizedDescriptionKey: "Invalid server response"])
         }
         
+        if httpResponse.statusCode == 404 {
+            throw NSError(domain: "ServerError", code: 0, userInfo: [NSLocalizedDescriptionKey: "User not found"])
+        }
+        
+        if httpResponse.statusCode == 400 {
+            throw NSError(domain: "ServerError", code: 0, userInfo: [NSLocalizedDescriptionKey: "Bad request: \(String(data: data, encoding: .utf8) ?? "Unknown error")"])
+        }
+        
+        guard 200...299 ~= httpResponse.statusCode else {
+            logger.error("Server responded with an error when editing user info")
+            throw NSError(domain: "ServerError", code: 0, userInfo: [NSLocalizedDescriptionKey: "Server responded with an error when editing user info: \(String(data: data, encoding: .utf8) ?? "Unknown error")"])
+        }
+        
+        // Parse the response
+        if let updatedUser = try JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] {
+            logger.info("User info edited successfully")
+            updateUserDataFromResponse(updatedUser)
+        } else {
+            throw NSError(domain: "ServerError", code: 0, userInfo: [NSLocalizedDescriptionKey: "Server did not return expected response for user edit"])
+        }
+    }
+    
+    private func updateUserDataFromResponse(_ response: [String: Any]) {
+        DispatchQueue.main.async {
+            if let nombre = response["nombre"] as? String {
+                self.userData.nombre = nombre
+            }
+            if let celular = response["celular"] as? String {
+                self.userData.celular = celular
+            }
+            if let email = response["email"] as? String {
+                self.userData.email = email
+            }
+            if let genero = response["genero"] as? String {
+                self.userData.genero = genero
+            }
+            if let fechaDeNacimiento = response["fechaDeNacimiento"] as? String {
+                self.userData.fechaDeNacimiento = fechaDeNacimiento
+            }
+            if let tipo = response["tipo"] as? String {
+                self.userData.tipo = tipo
+            }
+        }
+    }
+    
+    private func initiateEmailVerification() async throws {
+        logger.info("Initiating email verification")
+        try await Auth.auth().currentUser?.sendEmailVerification()
         logger.info("Email verification initiated successfully")
+    }
+    
+    @MainActor
+    func refreshEmailVerificationStatus() async {
+        guard let user = Auth.auth().currentUser else {
+            authState = .signedOut
+            return
+        }
+        
+        do {
+            try await user.reload()
+            if user.isEmailVerified {
+                authState = .authenticated
+                await fetchUserInfo()
+            } else {
+                authState = .needsEmailVerification
+            }
+        } catch {
+            logger.error("Failed to refresh email verification status: \(error.localizedDescription)")
+            authState = .error("Failed to refresh email verification status. Please try again.")
+        }
+    }
+    
+    @MainActor
+    func resendVerificationEmail() async {
+        guard let user = Auth.auth().currentUser else {
+            authState = .signedOut
+            return
+        }
+        
+        do {
+            try await user.sendEmailVerification()
+            logger.info("Verification email resent successfully")
+        } catch {
+            logger.error("Failed to resend verification email: \(error.localizedDescription)")
+            authState = .error("Failed to resend verification email. Please try again later.")
+        }
     }
     
     @MainActor
     func fetchUserInfo() async -> Bool {
         logger.info("Fetching user info from server")
-        guard let url = URL(string: "\(baseURL)/user") else {
+        guard let url = URL(string: "\(baseURL)/getUsuario?uid=\(userData.firebaseUID)") else {
             authState = .error("Invalid URL")
             return false
         }
@@ -255,31 +419,5 @@ class AuthModel: ObservableObject {
             }
         }
         return false
-    }
-    
-    func updateUserInfo(newData: [String: Any]) async throws {
-        logger.info("Updating user info")
-        do {
-            // Perform the update on the main thread
-            await MainActor.run {
-                // Update only the fields that are provided
-                if let name = newData["name"] as? String {
-                    self.userData.name = name
-                }
-                if let phone = newData["phone"] as? String {
-                    self.userData.phone = phone
-                }
-                if let email = newData["email"] as? String {
-                    self.userData.email = email
-                }
-            }
-            
-            // Send the updated user data to the server
-            try await sendUserInfo()
-            logger.info("User info updated successfully")
-        } catch {
-            logger.error("Failed to update user info: \(error.localizedDescription)")
-            throw error
-        }
     }
 }
